@@ -1,4 +1,4 @@
-# noetic.js
+# noetic.js 🧠
 Noetic is a (study purposes) JavaScript utiliy library 
 
 ## What does this mean?
