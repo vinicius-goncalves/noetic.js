@@ -1,13 +1,9 @@
 import isArray from "@/typed/isArray";
 import isObject from "@/typed/isObject";
 import getTypeTag from "@/utils/getTypeTag";
-
-type TWrapperIDBParams = {
-  storage: string;
-  idbVersion?: number;
-  keyPath?: string;
-  autoIncrement?: boolean;
-}
+import type { TDeleteOne } from "./@types/TDeleteOne";
+import type { TGetAll } from "./@types/TGetAll";
+import type { TWrapperIDBParams } from "./@types/TWrapperIDBParams";
 
 enum IDBModes {
   WRITE = 'readwrite',
@@ -17,7 +13,7 @@ enum IDBModes {
 const DEFAULT_STORAGE_NAME = 'storage';
 const DEFAULT_IDB_VERSION = 1;
 const DEFAULT_KEY_PATH = 'id';
-const DEFAULT_AUTO_INCREMENT = false
+const DEFAULT_AUTO_INCREMENT = false;
 
 const $dbCache = new Map<string, Promise<IDBDatabase>>();
 
@@ -65,11 +61,11 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
     });
   }
 
-  const $eq = async (key: string, value: unknown, limit: number = Number.MAX_SAFE_INTEGER) => {
+  const $eqQuery = async (key: string, value: unknown, limit: number = Number.MAX_SAFE_INTEGER) => {
     const $db = await $idb as IDBDatabase;
 
     return new Promise<unknown[]>((resolve, reject) => {
-      const transaction = $db.transaction([storage], 'readonly');
+      const transaction = $db.transaction([storage], IDBModes.READ);
       const objectStore = transaction.objectStore(storage);
 
       const req = objectStore.openCursor(null, 'next');
@@ -108,11 +104,11 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
     })
   }
 
-  const $notEq = async (key: string, value: unknown, limit: number = Number.MAX_SAFE_INTEGER) => {
+  const $notEqQuery = async (key: string, value: unknown, limit: number = Number.MAX_SAFE_INTEGER) => {
     const $db = await $idb as IDBDatabase;
 
     return new Promise<unknown[]>((resolve, reject) => {
-      const transaction = $db.transaction([storage], 'readonly');
+      const transaction = $db.transaction([storage], IDBModes.READ);
       const objectStore = transaction.objectStore(storage);
 
       const req = objectStore.openCursor(null, 'next');
@@ -148,6 +144,51 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
           `Reason: ${req.error?.message || 'Unknown error'}`
         ));
       };
+    })
+  }
+
+  const $deleteEq = async (data: Record<PropertyKey, unknown>, limit: number = Number.MAX_SAFE_INTEGER) => {
+    const db = await $idb as IDBDatabase
+
+    return new Promise<{ deletedLength: number, deletedData: Array<Record<PropertyKey, unknown>> }>((resolve, reject) => {
+      const transaction = db.transaction([storage], IDBModes.WRITE);
+      const objectStore = transaction.objectStore(storage);
+
+      const req = objectStore.openCursor(null, 'next');
+      const deletedData: Array<Record<PropertyKey, unknown>> = []
+
+      req.onsuccess = () => {
+        const cursor = req.result as IDBCursorWithValue;
+
+        if (deletedData.length === limit) {
+          resolve({ deletedLength: deletedData.length, deletedData })
+          return;
+        }
+
+        if (!cursor) {
+          resolve({ deletedLength: deletedData.length, deletedData })
+          return;
+        }
+
+        const target = cursor.value
+        const dataMatch = Object.entries(data).every(([k, v]) => k in target && target[k] === v)
+
+        if (dataMatch) {
+          cursor.delete()
+          deletedData.push(target)
+          cursor.continue()
+          return
+        }
+
+        cursor.continue();
+      }
+
+      req.onerror = () => {
+        reject(new Error(
+          `[❌] Failed to delete data from "${storage}":\n` +
+          `Reason: ${req.error?.message || 'Unknown error'}\n`
+        ));
+      }
     })
   }
 
@@ -274,7 +315,22 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
         })
       })
     },
-    getAll: <T extends { limit: number } | undefined = undefined>(options?: T): T extends undefined ? Promise<unknown[]> & { limit: (limit: number) => Promise<unknown[]>; } : Promise<T[]> => {
+    deleteOne: <T extends Record<PropertyKey, unknown> | undefined = undefined>(data?: T): TDeleteOne<T> => {
+      if (data !== undefined) {
+        return $deleteEq(data, 1) as any satisfies Promise<{ deletedLength: number; deletedData: Record<PropertyKey, unknown>[]; }>
+      }
+
+      return {
+        where: (key: string) => {
+          return {
+            eq: async (value: unknown): Promise<{ deletedLength: number, deletedData: Array<Record<PropertyKey, unknown>> }> => {
+              return (await $deleteEq({ [key]: value }, 1))
+            }
+          }
+        }
+      } as any satisfies { where: (key: string) => { eq: (value: unknown) => Promise<{ deletedLength: number; deletedData: Array<Record<PropertyKey, unknown>>; }>; }; }
+    },
+    getAll: <T extends { limit: number } | undefined = undefined>(options?: T): TGetAll<T> => {
       const $getAll = async (limit?: number): Promise<unknown[]> => {
         const db = await $idb as IDBDatabase;
 
@@ -296,12 +352,12 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
 
       if (options !== undefined) {
         const limit = typeof options === 'number' ? options : options.limit;
-        return $getAll(limit) as any satisfies Promise<unknown[]>
+        return $getAll(limit) as any satisfies Promise<unknown[]>;
       }
 
-      const $promise = $getAll() as Promise<unknown[]> & { limit: (n: number) => Promise<unknown[]> }
-      $promise.limit = (limit: number) => $getAll(limit)
-      return $promise as any satisfies Promise<unknown[]> & { limit: (n: number) => Promise<unknown[]> }
+      const $promise = $getAll() as Promise<unknown[]> & { limit: (n: number) => Promise<unknown[]> };
+      $promise.limit = (limit: number) => $getAll(limit);
+      return $promise as any satisfies Promise<unknown[]> & { limit: (n: number) => Promise<unknown[]> };
     },
     query: () => {
       return {
@@ -310,10 +366,10 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
             where: (key: string) => {
               return {
                 eq: (value: unknown) => {
-                  return $eq(key, value)
+                  return $eqQuery(key, value)
                 },
                 notEq: (value: unknown) => {
-                  return $notEq(key, value)
+                  return $notEqQuery(key, value)
                 }
               }
             }
@@ -324,10 +380,10 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
             where: (key: string) => {
               return {
                 eq: async (value: unknown) => {
-                  return (await $eq(key, value, 1))[0]
+                  return (await $eqQuery(key, value, 1))[0]
                 },
                 notEq: async (value: unknown) => {
-                  return (await $notEq(key, value, 1))[0]
+                  return (await $notEqQuery(key, value, 1))[0]
                 }
               };
             }
@@ -345,10 +401,10 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
             where: (key: string) => {
               return {
                 eq: (value: unknown) => {
-                  return $eq(key, value)
+                  return $eqQuery(key, value)
                 },
                 notEq: (value: unknown) => {
-                  return $notEq(key, value)
+                  return $notEqQuery(key, value)
                 }
               }
             }
@@ -384,10 +440,17 @@ export function idb({ storage = DEFAULT_STORAGE_NAME, idbVersion = DEFAULT_IDB_V
                 return;
               }
 
-              const data = { ...target, ...newData }
+              const data: Record<PropertyKey, unknown> = { ...target, ...newData }
               cursor.update(data);
               resolve({ old: target, new: data })
               return;
+            }
+
+            req.onerror = () => {
+              reject(new Error(
+                `[❌] Failed to update data from "${storage}":\n` +
+                `Reason: ${req.error?.message || 'Unknown error'}\n`
+              ));
             }
           })
         },
