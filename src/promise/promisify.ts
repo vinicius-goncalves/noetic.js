@@ -1,6 +1,6 @@
 import isFunction from "@/typed/isFunction";
 
-export function promisify(fn: (...args: unknown[]) => unknown) {
+export function promisify(fn: (...args: any[]) => any) {
   if (!isFunction(fn)) {
     throw new TypeError('Expected a function as argument in "promisify" function (@promises/promisify).')
   }
@@ -9,4 +9,14 @@ export function promisify(fn: (...args: unknown[]) => unknown) {
     throw new TypeError('"promisify" expected a function as argument.')
   }
 
+  return function (this: unknown, ...args: any[]) {
+    return new Promise((resolve, reject) => {
+      try {
+        const res = fn.apply(this, args)
+        resolve(res)
+      } catch (err) {
+        reject(err);
+      }
+    })
+  }
 }
